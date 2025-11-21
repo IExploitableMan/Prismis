@@ -22,5 +22,7 @@ You can tweak the following constants in the source code to adjust rendering:
 ```
 
 ## Gallery
-
-![](16k_200samples_20depth.png)
+<details>
+<summary>Expand</summary>
+<img src="16k_200samples_20depth.png">
+</details>
