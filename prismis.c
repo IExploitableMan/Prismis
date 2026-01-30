@@ -9,10 +9,10 @@
 // Before invention of the constexpr
 #define WIDTH 960
 #define HEIGHT 540
-#define MAX_DEPTH 5 // Maximum number of bounces per ray
+#define MAX_DEPTH 8 // Maximum number of bounces per ray
 #define SAMPLES 4 // Number of samples per pixel
 #define THREADS 8
-#define SEGMENT_SIZE 16 // Size of image segment (tile) for work distribution among threads
+#define SEGMENT_SIZE 128 // Size of image segment (tile) for work distribution among threads
 #define ASPECT ((float)WIDTH / (float)HEIGHT)
 
 #define PI 3.14159265358979323846 // Literally idk why M_PI wont work
@@ -225,6 +225,22 @@ V3f sphere_uv(V3f t, V3f n, SDL_Surface *texture)
     return (V3f){r / 255.f, g / 255.f, b / 255.f};
 }
 
+V3f plane_uv(V3f p, V3f n, SDL_Surface *texture)
+{
+    float u = p.x - floorf(p.x);
+    float v = p.z - floorf(p.z);
+    uint32_t tex_x = (uint32_t)(u * texture->w) % texture->w;
+    uint32_t tex_y = (uint32_t)(v * texture->h) % texture->h;
+
+    SDL_PixelFormat *fmt = texture->format;
+    uint32_t *pixels = (uint32_t *)texture->pixels;
+    uint32_t pixel = pixels[tex_y * texture->w + tex_x];
+
+    uint8_t r, g, b;
+    SDL_GetRGB(pixel, fmt, &r, &g, &b);
+    return (V3f){r / 255.f, g / 255.f, b / 255.f};
+}
+
 V3f random_hemisphere(V3f n, uint32_t *seed)
 {
     float u1 = fprand(seed);
@@ -294,6 +310,8 @@ V3f trace(V3f ro, V3f rd, size_t depth, uint32_t *seed)
         {
             if (hit_obj->type == OBJ_SPHERE) {
                 base_color = sphere_uv(p, n, material.texture);
+            } else if (hit_obj->type == OBJ_PLANE) {
+                base_color = plane_uv(p, n, material.texture);
             }
         }
 
@@ -429,7 +447,8 @@ int main(void)
         SDL_WINDOWPOS_CENTERED,
         WIDTH,
         HEIGHT,
-        SDL_WINDOW_SHOWN);
+        SDL_WINDOW_SHOWN
+    );
     SDL_SetRelativeMouseMode(SDL_TRUE);
     if (!window)
     {
@@ -438,12 +457,36 @@ int main(void)
         return 1;
     }
 
-    SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+    SDL_Renderer *renderer = SDL_CreateRenderer(
+        window, 
+        -1,
+        SDL_RENDERER_SOFTWARE
+    );
     if (!renderer)
     {
         SDL_DestroyWindow(window);
         SDL_Quit();
         printf("SDL_CreateRenderer Error: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    if (TTF_Init() != 0)
+    {
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        printf("TTF_Init Error: %s\n", TTF_GetError());
+        return 1;
+    }
+
+    TTF_Font *font = TTF_OpenFont("assets/RobotoMono.ttf", 16);
+    if (!font)
+    {
+        TTF_Quit();
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        printf("TTF_OpenFont Error: %s\n", TTF_GetError());
         return 1;
     }
 
@@ -456,9 +499,11 @@ int main(void)
         return 1;
     }
 
-    SDL_Surface *checkerboard = IMG_Load("assets/checkerboard.png");
+    SDL_Surface *checkerboard = IMG_Load("assets/strange.png");
     if (!checkerboard)
     {
+        TTF_CloseFont(font);
+        TTF_Quit();
         IMG_Quit();
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
@@ -469,6 +514,8 @@ int main(void)
     SDL_Surface *converted = SDL_ConvertSurfaceFormat(checkerboard, SDL_PIXELFORMAT_XRGB8888, 0);
     if (!converted)
     {
+        TTF_CloseFont(font);
+        TTF_Quit();
         SDL_FreeSurface(checkerboard);
         IMG_Quit();
         SDL_DestroyRenderer(renderer);
@@ -488,6 +535,8 @@ int main(void)
         HEIGHT); // Resizing for loosers
     if (!texture)
     {
+        TTF_CloseFont(font);
+        TTF_Quit();
         SDL_FreeSurface(checkerboard);
         IMG_Quit();
         SDL_DestroyRenderer(renderer);
@@ -500,6 +549,8 @@ int main(void)
     uint32_t *buffer = malloc(WIDTH * HEIGHT * sizeof(uint32_t));
     if (!buffer)
     {
+        TTF_CloseFont(font);
+        TTF_Quit();
         SDL_DestroyTexture(texture);
         SDL_FreeSurface(checkerboard);
         IMG_Quit();
@@ -513,9 +564,16 @@ int main(void)
     V3f camera = {0, 0, -5};
     float yaw = 0.f;
     float pitch = 0.f;
+    size_t frame = 0;
+    uint64_t last_time;
+    uint64_t total_time = 0;
+    SDL_Texture *fps_texture = NULL;
+    SDL_Rect fps_rect;
+    SDL_bool unk_fps = SDL_TRUE;
 
     // Assign texture to sphere material
     scene[0].material.texture = checkerboard;
+    scene[3].material.texture = checkerboard;
 
     size_t num_segments = ((WIDTH + SEGMENT_SIZE - 1) / SEGMENT_SIZE) * ((HEIGHT + SEGMENT_SIZE - 1) / SEGMENT_SIZE);
     Segment *segments = malloc(sizeof(Segment) * num_segments);
@@ -533,6 +591,7 @@ int main(void)
 
     while (running)
     {
+        last_time = SDL_GetTicks64();
         while (SDL_PollEvent(&event))
         {
             if (event.type == SDL_QUIT)
@@ -581,16 +640,52 @@ int main(void)
         for (size_t i = 0; i < THREADS; i++)
             pthread_join(threads[i], NULL);
 
+        total_time += SDL_GetTicks64() - last_time;
+        if (++frame == 10 || unk_fps)
+        {
+            uint16_t fps = roundf((unk_fps ? 1.0f : 10.0f) * 1000.0f / total_time);
+            if (unk_fps)
+                unk_fps = SDL_FALSE;
+
+            char fps_text[16];
+            snprintf(fps_text, sizeof(fps_text), "FPS: %u", fps);
+
+            SDL_Surface *fps_surface =
+                TTF_RenderUTF8_Blended(font, fps_text,
+                                    (SDL_Color){0,0,0,255});
+
+            if (fps_texture)
+                SDL_DestroyTexture(fps_texture);
+
+            fps_texture = SDL_CreateTextureFromSurface(renderer, fps_surface);
+
+            fps_rect.w = fps_surface->w;
+            fps_rect.h = fps_surface->h;
+            fps_rect.x = 10;
+            fps_rect.y = 10;
+
+            SDL_FreeSurface(fps_surface);
+
+            frame = 0;
+            total_time = 0;
+        }
+
         SDL_UpdateTexture(texture, NULL, buffer, WIDTH * sizeof(uint32_t));
         SDL_RenderCopy(renderer, texture, NULL, NULL);
+
+        if (fps_texture)
+            SDL_RenderCopy(renderer, fps_texture, NULL, &fps_rect);
 
         SDL_RenderPresent(renderer);
     }
 
+    free(buffer);
+    free(segments);
+    SDL_DestroyTexture(fps_texture);
     SDL_FreeSurface(checkerboard);
     IMG_Quit();
-    free(segments);
-    free(buffer);
+    TTF_CloseFont(font);
+    TTF_Quit();
     SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

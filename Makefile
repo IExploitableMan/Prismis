@@ -1,6 +1,6 @@
 CC       := cc
-CFLAGS   := -Iinclude -O3 -ffast-math -march=native -D_REENTRANT
-LDFLAGS  := -lm -lSDL2 -lSDL2_image
+CFLAGS   := -Iinclude -O3 -ffast-math -march=native -pthread
+LDFLAGS  := -lm -lSDL2 -lSDL2_image -lSDL2_ttf
 
 C3C      := c3c
 C3FLAGS := -l SDL2 -O5 --safe=no --optlevel=max --unroll-loops=yes --slp-vectorize=yes --loop-vectorize=yes --merge-functions=yes --single-module=yes
