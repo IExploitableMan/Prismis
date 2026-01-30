@@ -2,6 +2,7 @@
 #include <pthread.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_image.h>
 #define LA_IMPLEMENTATION
 #include <la.h>
 
@@ -42,6 +43,7 @@ typedef struct
     MaterialType type;
     float roughness;
     float ior;
+   SDL_Surface* texture;
 } Material;
 
 typedef struct
@@ -207,6 +209,22 @@ float cube_intersect(V3f ro, V3f rd, V3f min, V3f max)
     return tmin > 0.f ? tmin : tmax;
 }
 
+V3f sphere_uv(V3f t, V3f n, SDL_Surface *texture) 
+{
+    float u = atan2f(n.z, n.x) / (2.f * PI) + 0.5f;
+    float v = 0.5f - asinf(n.y) / PI;
+    uint32_t tex_x = (uint32_t)(u * texture->w) % texture->w;
+    uint32_t tex_y = (uint32_t)(v * texture->h) % texture->h;
+    
+    SDL_PixelFormat *fmt = texture->format;
+    uint32_t *pixels = (uint32_t *)texture->pixels;
+    uint32_t pixel = pixels[tex_y * texture->w + tex_x];
+
+    uint8_t r, g, b;
+    SDL_GetRGB(pixel, fmt, &r, &g, &b);
+    return (V3f){r / 255.f, g / 255.f, b / 255.f};
+}
+
 V3f random_hemisphere(V3f n, uint32_t *seed)
 {
     float u1 = fprand(seed);
@@ -271,8 +289,16 @@ V3f trace(V3f ro, V3f rd, size_t depth, uint32_t *seed)
 
     if (material.type == MAT_LAMBERTIAN)
     {
+        V3f base_color = material.color;
+        if (material.texture) 
+        {
+            if (hit_obj->type == OBJ_SPHERE) {
+                base_color = sphere_uv(p, n, material.texture);
+            }
+        }
+
         V3f new_dir = random_hemisphere(n, seed);
-        V3f indirect = v3f_mul(material.color, trace(p_eps, new_dir, depth + 1, seed));
+        V3f indirect = v3f_mul(base_color, trace(p_eps, new_dir, depth + 1, seed));
 
         V3f to_light = v3f_safe_norm(v3f_sub(light_position, p));
         float dot_nl = fmaxf(0.f, v3f_dot(n, to_light));
@@ -285,6 +311,8 @@ V3f trace(V3f ro, V3f rd, size_t depth, uint32_t *seed)
                 t_shadow = sphere_intersect(p_eps, to_light, scene[i].position, scene[i].radius);
             else if (scene[i].type == OBJ_PLANE)
                 t_shadow = plane_intersect(p_eps, to_light, scene[i].position, scene[i].normal);
+            else if (scene[i].type == OBJ_CUBE)
+                t_shadow = cube_intersect(p_eps, to_light, scene[i].cube.min, scene[i].cube.max);
             if (t_shadow > 0.f)
             {
                 in_shadow = SDL_TRUE;
@@ -292,7 +320,7 @@ V3f trace(V3f ro, V3f rd, size_t depth, uint32_t *seed)
             }
         }
 
-        V3f direct = in_shadow ? (V3f){0, 0, 0} : v3f_mul(material.color, v3f_scale(light_color, dot_nl));
+        V3f direct = in_shadow ? (V3f){0, 0, 0} : v3f_mul(base_color, v3f_scale(light_color, dot_nl));
         color = v3f_add(indirect, direct);
     }
     else if (material.type == MAT_SPECULAR)
@@ -419,6 +447,39 @@ int main(void)
         return 1;
     }
 
+    if (IMG_Init(IMG_INIT_PNG) == 0)
+    {
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        printf("IMG_Init Error: %s\n", IMG_GetError());
+        return 1;
+    }
+
+    SDL_Surface *checkerboard = IMG_Load("assets/checkerboard.png");
+    if (!checkerboard)
+    {
+        IMG_Quit();
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        printf("IMG_Load Error: %s\n", IMG_GetError());
+        return 1;
+    }
+    SDL_Surface *converted = SDL_ConvertSurfaceFormat(checkerboard, SDL_PIXELFORMAT_XRGB8888, 0);
+    if (!converted)
+    {
+        SDL_FreeSurface(checkerboard);
+        IMG_Quit();
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        printf("SDL_ConvertSurfaceFormat Error: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_FreeSurface(checkerboard);
+    checkerboard = converted;
+
     SDL_Texture *texture = SDL_CreateTexture(
         renderer,
         SDL_PIXELFORMAT_XRGB8888,
@@ -427,6 +488,8 @@ int main(void)
         HEIGHT); // Resizing for loosers
     if (!texture)
     {
+        SDL_FreeSurface(checkerboard);
+        IMG_Quit();
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -437,6 +500,9 @@ int main(void)
     uint32_t *buffer = malloc(WIDTH * HEIGHT * sizeof(uint32_t));
     if (!buffer)
     {
+        SDL_DestroyTexture(texture);
+        SDL_FreeSurface(checkerboard);
+        IMG_Quit();
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -447,6 +513,9 @@ int main(void)
     V3f camera = {0, 0, -5};
     float yaw = 0.f;
     float pitch = 0.f;
+
+    // Assign texture to sphere material
+    scene[0].material.texture = checkerboard;
 
     size_t num_segments = ((WIDTH + SEGMENT_SIZE - 1) / SEGMENT_SIZE) * ((HEIGHT + SEGMENT_SIZE - 1) / SEGMENT_SIZE);
     Segment *segments = malloc(sizeof(Segment) * num_segments);
@@ -518,6 +587,8 @@ int main(void)
         SDL_RenderPresent(renderer);
     }
 
+    SDL_FreeSurface(checkerboard);
+    IMG_Quit();
     free(segments);
     free(buffer);
     SDL_DestroyTexture(texture);

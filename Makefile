@@ -1,6 +1,6 @@
 CC       := cc
 CFLAGS   := -Iinclude -O3 -ffast-math -march=native -D_REENTRANT
-LDFLAGS  := -lm -lSDL2
+LDFLAGS  := -lm -lSDL2 -lSDL2_image
 
 C3C      := c3c
 C3FLAGS := -l SDL2 -O5 --safe=no --optlevel=max --unroll-loops=yes --slp-vectorize=yes --loop-vectorize=yes --merge-functions=yes --single-module=yes
@@ -24,6 +24,10 @@ $(OBJ): $(SRC) | $(BUILD_DIR)
 
 $(BUILD_DIR)/$(TARGET): $(OBJ)
 	$(CC) $^ -o $@ $(LDFLAGS)
+
+run: $(BUILD_DIR)/$(TARGET)
+	$(CC) $(CFLAGS) -o $(BUILD_DIR)/$(TARGET) $(SRC) $(LDFLAGS)
+	$(BUILD_DIR)/$(TARGET)
 
 c3: | $(BUILD_DIR)
 	$(C3C) compile $(C3_SRC) -o $(BUILD_DIR)/$(C3_OUT) $(C3FLAGS)
