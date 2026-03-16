@@ -18,7 +18,7 @@
 #define PI 3.14159265358979323846 // Literally idk why M_PI wont work
 #define SCENE_SIZE 5
 
-#define SPEED 0.1f
+#define SPEED 3.0f
 #define SENSITIVITY 0.002f
 #define FOV PI / 2.f
 
@@ -241,6 +241,40 @@ V3f plane_uv(V3f p, V3f n, SDL_Surface *texture)
     return (V3f){r / 255.f, g / 255.f, b / 255.f};
 }
 
+V3f cube_uv(V3f p, V3f n, SDL_Surface *texture) // broken shit...
+{
+    float u, v;
+    if (fabsf(n.x) > 0.999f)
+    {
+        u = (p.z - floorf(p.z));
+        v = (p.y - floorf(p.y));
+
+    }
+    else if (fabsf(n.y) > 0.999f)
+    {
+        u = (p.x - floorf(p.x));
+        v = (p.z - floorf(p.z));
+        
+    }
+    else
+    {
+        u = (p.x - floorf(p.x));
+        v = (p.y - floorf(p.y));
+        
+    }
+
+    uint32_t tex_x = (uint32_t)(u * texture->w) % texture->w;
+    uint32_t tex_y = (uint32_t)(v * texture->h) % texture->h;
+
+    SDL_PixelFormat *fmt = texture->format;
+    uint32_t *pixels = (uint32_t *)texture->pixels;
+    uint32_t pixel = pixels[tex_y * texture->w + tex_x];
+
+    uint8_t r, g, b;
+    SDL_GetRGB(pixel, fmt, &r, &g, &b);
+    return (V3f){r / 255.f, g / 255.f, b / 255.f};
+}
+
 V3f random_hemisphere(V3f n, uint32_t *seed)
 {
     float u1 = fprand(seed);
@@ -281,8 +315,8 @@ V3f trace(V3f ro, V3f rd, size_t depth, uint32_t *seed)
             t = plane_intersect(ro, rd, scene[i].position, scene[i].normal);
         else if (scene[i].type == OBJ_CUBE)
             t = cube_intersect(ro, rd,
-                               scene[i].cube.max,
-                               scene[i].cube.min);
+                               scene[i].cube.min,
+                               scene[i].cube.max);
 
         if (t > 0 && t < t_min)
         {
@@ -308,10 +342,20 @@ V3f trace(V3f ro, V3f rd, size_t depth, uint32_t *seed)
         V3f base_color = material.color;
         if (material.texture) 
         {
-            if (hit_obj->type == OBJ_SPHERE) {
+            switch (hit_obj->type)
+            {
+            case OBJ_SPHERE:
                 base_color = sphere_uv(p, n, material.texture);
-            } else if (hit_obj->type == OBJ_PLANE) {
+                break;
+            case OBJ_PLANE:
                 base_color = plane_uv(p, n, material.texture);
+                break;
+            case OBJ_CUBE:
+                base_color = cube_uv(p, n, material.texture);
+                break;
+            
+            default:
+                break;
             }
         }
 
@@ -433,6 +477,24 @@ void *worker(void *arg)
     return NULL;
 }
 
+SDL_Surface* load_texture(const char* path)
+{
+    SDL_Surface* surface = IMG_Load(path);
+    if (!surface)
+    {
+        printf("IMG_Load Error: %s\n", IMG_GetError());
+        return NULL;
+    }
+    SDL_Surface* converted = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_XRGB8888, 0);
+    SDL_FreeSurface(surface);
+    if (!converted)
+    {
+        printf("SDL_ConvertSurfaceFormat Error: %s\n", SDL_GetError());
+        return NULL;
+    }
+    return converted;
+}
+
 int main(void)
 {
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
@@ -499,8 +561,10 @@ int main(void)
         return 1;
     }
 
-    SDL_Surface *checkerboard = IMG_Load("assets/strange.png");
-    if (!checkerboard)
+    SDL_Surface *checkerboard = load_texture("assets/checkerboard.png");
+    SDL_Surface *strange = load_texture("assets/strange.png");
+    SDL_Surface *wood = load_texture("assets/wood.png");
+    if (!checkerboard || !strange || !wood)
     {
         TTF_CloseFont(font);
         TTF_Quit();
@@ -508,24 +572,8 @@ int main(void)
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
         SDL_Quit();
-        printf("IMG_Load Error: %s\n", IMG_GetError());
         return 1;
     }
-    SDL_Surface *converted = SDL_ConvertSurfaceFormat(checkerboard, SDL_PIXELFORMAT_XRGB8888, 0);
-    if (!converted)
-    {
-        TTF_CloseFont(font);
-        TTF_Quit();
-        SDL_FreeSurface(checkerboard);
-        IMG_Quit();
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        printf("SDL_ConvertSurfaceFormat Error: %s\n", SDL_GetError());
-        return 1;
-    }
-    SDL_FreeSurface(checkerboard);
-    checkerboard = converted;
 
     SDL_Texture *texture = SDL_CreateTexture(
         renderer,
@@ -565,15 +613,16 @@ int main(void)
     float yaw = 0.f;
     float pitch = 0.f;
     size_t frame = 0;
-    uint64_t last_time;
+    uint64_t dt = 0;
+    uint64_t frame_time = 0;
     uint64_t total_time = 0;
     SDL_Texture *fps_texture = NULL;
     SDL_Rect fps_rect;
     SDL_bool unk_fps = SDL_TRUE;
 
-    // Assign texture to sphere material
     scene[0].material.texture = checkerboard;
-    scene[3].material.texture = checkerboard;
+    scene[3].material.texture = strange;
+    scene[4].material.texture = wood;
 
     size_t num_segments = ((WIDTH + SEGMENT_SIZE - 1) / SEGMENT_SIZE) * ((HEIGHT + SEGMENT_SIZE - 1) / SEGMENT_SIZE);
     Segment *segments = malloc(sizeof(Segment) * num_segments);
@@ -591,7 +640,8 @@ int main(void)
 
     while (running)
     {
-        last_time = SDL_GetTicks64();
+        dt = SDL_GetTicks64() - frame_time;
+        frame_time = SDL_GetTicks64();
         while (SDL_PollEvent(&event))
         {
             if (event.type == SDL_QUIT)
@@ -615,14 +665,21 @@ int main(void)
         if (pitch < -PI / 2.f + __FLT_EPSILON__)
             pitch = -PI / 2.f + __FLT_EPSILON__;
 
+        V3f move_dir = {0};
         if (key_states[SDL_SCANCODE_W])
-            camera = v3f_add(camera, v3f_scale(forward, SPEED));
+            move_dir = v3f_add(move_dir, forward);
         if (key_states[SDL_SCANCODE_S])
-            camera = v3f_sub(camera, v3f_scale(forward, SPEED));
+            move_dir = v3f_sub(move_dir, forward);
         if (key_states[SDL_SCANCODE_A])
-            camera = v3f_sub(camera, v3f_scale(right, SPEED));
+            move_dir = v3f_sub(move_dir, right);
         if (key_states[SDL_SCANCODE_D])
-            camera = v3f_add(camera, v3f_scale(right, SPEED));
+            move_dir = v3f_add(move_dir, right);
+
+        if (v3f_dot(move_dir, move_dir) > 0.001f)
+        {
+            move_dir = v3f_safe_norm(move_dir);
+            camera = v3f_add(camera, v3f_scale(move_dir, SPEED * dt / 1000.f));
+        }
 
         Thread data = {
             buffer,
@@ -640,7 +697,7 @@ int main(void)
         for (size_t i = 0; i < THREADS; i++)
             pthread_join(threads[i], NULL);
 
-        total_time += SDL_GetTicks64() - last_time;
+        total_time += SDL_GetTicks64() - frame_time;
         if (++frame == 10 || unk_fps)
         {
             uint16_t fps = roundf((unk_fps ? 1.0f : 10.0f) * 1000.0f / total_time);
@@ -683,6 +740,8 @@ int main(void)
     free(segments);
     SDL_DestroyTexture(fps_texture);
     SDL_FreeSurface(checkerboard);
+    SDL_FreeSurface(strange);
+    SDL_FreeSurface(wood);
     IMG_Quit();
     TTF_CloseFont(font);
     TTF_Quit();
