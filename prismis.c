@@ -3,6 +3,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
+#include <assert.h>
 #define LA_IMPLEMENTATION
 #include <la.h>
 
@@ -10,7 +11,7 @@
 #define WIDTH 960
 #define HEIGHT 540
 #define MAX_DEPTH 8 // Maximum number of bounces per ray
-#define SAMPLES 4 // Number of samples per pixel
+#define SAMPLES 4   // Number of samples per pixel
 #define THREADS 8
 #define SEGMENT_SIZE 128 // Size of image segment (tile) for work distribution among threads
 #define ASPECT ((float)WIDTH / (float)HEIGHT)
@@ -21,6 +22,9 @@
 #define SPEED 3.0f
 #define SENSITIVITY 0.002f
 #define FOV PI / 2.f
+
+#define SIGN(x) ((x > 0) ? 1 : (x < 0) ? -1 \
+                                       : 0)
 
 typedef enum
 {
@@ -43,7 +47,7 @@ typedef struct
     MaterialType type;
     float roughness;
     float ior;
-   SDL_Surface* texture;
+    SDL_Surface *texture;
 } Material;
 
 typedef struct
@@ -86,7 +90,7 @@ Object scene[SCENE_SIZE] = {
     {OBJ_SPHERE, {-2.2f, 0, 0}, .radius = 1.f, .material = {.color = {0.95, 0.95, 0.95}, .type = MAT_SPECULAR, .roughness = 0.f, .ior = 1.f}},
     {OBJ_SPHERE, {2.2f, 0, 0}, .radius = 1.f, .material = {.color = {0.9, 0.95, 1}, .type = MAT_DIELECTRIC, .roughness = 0.f, .ior = 1.5f}},
     {OBJ_PLANE, {0, -1, 0}, .normal = {0, 1, 0}, .material = {.color = {0.8, 0.8, 0.8}, .type = MAT_LAMBERTIAN, .roughness = 0.3f, .ior = 1.f}},
-    {OBJ_CUBE, {0, 1, 3}, .cube = {.min = {-0.5f, 0.5f, 2.5f}, .max = {0.5f, 1.5f, 3.5f}}, .material = {.color = {0.2, 0.8, 0.2}, .type = MAT_LAMBERTIAN, .roughness = 0.5f, .ior = 1.f}}};
+    {OBJ_CUBE, {0, 1, 2}, .cube = {.min = {-0.5f, -0.5f, -0.5f}, .max = {0.5f, 0.5f, 0.5f}}, .material = {.color = {0.2, 0.8, 0.2}, .type = MAT_LAMBERTIAN, .roughness = 0.5f, .ior = 1.f}}};
 
 static uint32_t prand(uint32_t *seed)
 {
@@ -161,10 +165,12 @@ float plane_intersect(V3f ro, V3f rd, V3f p0, V3f n)
     return t > 0 ? t : -1.f;
 }
 
-float cube_intersect(V3f ro, V3f rd, V3f min, V3f max)
+float cube_intersect(V3f ro, V3f rd, V3f center, V3f min, V3f max)
 {
-    float tmin = (min.x - ro.x) / rd.x;
-    float tmax = (max.x - ro.x) / rd.x;
+    V3f abs_min = v3f_add(center, min);
+    V3f abs_max = v3f_add(center, max);
+    float tmin = (abs_min.x - ro.x) / rd.x;
+    float tmax = (abs_max.x - ro.x) / rd.x;
     if (tmin > tmax)
     {
         float tmp = tmin;
@@ -172,8 +178,8 @@ float cube_intersect(V3f ro, V3f rd, V3f min, V3f max)
         tmax = tmp;
     }
 
-    float tymin = (min.y - ro.y) / rd.y;
-    float tymax = (max.y - ro.y) / rd.y;
+    float tymin = (abs_min.y - ro.y) / rd.y;
+    float tymax = (abs_max.y - ro.y) / rd.y;
     if (tymin > tymax)
     {
         float tmp = tymin;
@@ -189,8 +195,8 @@ float cube_intersect(V3f ro, V3f rd, V3f min, V3f max)
     if (tymax < tmax)
         tmax = tymax;
 
-    float tzmin = (min.z - ro.z) / rd.z;
-    float tzmax = (max.z - ro.z) / rd.z;
+    float tzmin = (abs_min.z - ro.z) / rd.z;
+    float tzmax = (abs_max.z - ro.z) / rd.z;
     if (tzmin > tzmax)
     {
         float tmp = tzmin;
@@ -209,13 +215,13 @@ float cube_intersect(V3f ro, V3f rd, V3f min, V3f max)
     return tmin > 0.f ? tmin : tmax;
 }
 
-V3f sphere_uv(V3f t, V3f n, SDL_Surface *texture) 
+V3f sphere_uv(V3f t, V3f n, SDL_Surface *texture)
 {
     float u = atan2f(n.z, n.x) / (2.f * PI) + 0.5f;
     float v = 0.5f - asinf(n.y) / PI;
     uint32_t tex_x = (uint32_t)(u * texture->w) % texture->w;
     uint32_t tex_y = (uint32_t)(v * texture->h) % texture->h;
-    
+
     SDL_PixelFormat *fmt = texture->format;
     uint32_t *pixels = (uint32_t *)texture->pixels;
     uint32_t pixel = pixels[tex_y * texture->w + tex_x];
@@ -241,26 +247,33 @@ V3f plane_uv(V3f p, V3f n, SDL_Surface *texture)
     return (V3f){r / 255.f, g / 255.f, b / 255.f};
 }
 
-V3f cube_uv(V3f p, V3f n, SDL_Surface *texture) // broken shit...
+V3f cube_uv(V3f p, V3f n, Object *cube, SDL_Surface *texture)
 {
+    V3f abs_min = v3f_add(cube->position, cube->cube.min);
+    V3f abs_max = v3f_add(cube->position, cube->cube.max);
+    V3f size = v3f_sub(cube->cube.max, cube->cube.min);
     float u, v;
-    if (fabsf(n.x) > 0.999f)
-    {
-        u = (p.z - floorf(p.z));
-        v = (p.y - floorf(p.y));
 
-    }
-    else if (fabsf(n.y) > 0.999f)
+    if (fabsf(n.x) > .5f)
     {
-        u = (p.x - floorf(p.x));
-        v = (p.z - floorf(p.z));
-        
+        u = (p.z - abs_min.z) / size.z;
+        v = (p.y - abs_min.y) / size.y;
+        if (n.x > 0.f)
+            u = 1.f - u;
+    }
+    else if (fabsf(n.y) > .5f)
+    {
+        u = (p.x - abs_min.x) / size.x;
+        v = (p.z - abs_min.z) / size.z;
+        if (n.y > 0.f)
+            v = 1.f - v;
     }
     else
     {
-        u = (p.x - floorf(p.x));
-        v = (p.y - floorf(p.y));
-        
+        u = (p.x - abs_min.x) / size.x;
+        v = (p.y - abs_min.y) / size.y;
+        if (n.z < 0.f)
+            u = 1.f - u;
     }
 
     uint32_t tex_x = (uint32_t)(u * texture->w) % texture->w;
@@ -273,6 +286,30 @@ V3f cube_uv(V3f p, V3f n, SDL_Surface *texture) // broken shit...
     uint8_t r, g, b;
     SDL_GetRGB(pixel, fmt, &r, &g, &b);
     return (V3f){r / 255.f, g / 255.f, b / 255.f};
+}
+
+V3f plane_normal(V3f p, Object *plane)
+{
+    return plane->normal;
+}
+
+V3f sphere_normal(V3f p, Object *sphere)
+{
+    return v3f_safe_norm(v3f_sub(p, sphere->position));
+}
+
+V3f cube_normal(V3f p, Object *cube)
+{
+    V3f center = cube->position;
+    V3f half = v3f_scale(v3f_sub(cube->cube.max, cube->cube.min), .5f);
+
+    V3f local = v3f_div(v3f_sub(p, center), half);
+    V3f abs_local = (V3f){fabsf(local.x), fabsf(local.y), fabsf(local.z)};
+    if (abs_local.x > abs_local.y && abs_local.x > abs_local.z)
+        return (V3f){SIGN(local.x), 0.f, 0.f};
+    if (abs_local.y > abs_local.z)
+        return (V3f){0.f, SIGN(local.y), 0.f};
+    return (V3f){0.f, 0.f, SIGN(local.z)};
 }
 
 V3f random_hemisphere(V3f n, uint32_t *seed)
@@ -314,7 +351,7 @@ V3f trace(V3f ro, V3f rd, size_t depth, uint32_t *seed)
         else if (scene[i].type == OBJ_PLANE)
             t = plane_intersect(ro, rd, scene[i].position, scene[i].normal);
         else if (scene[i].type == OBJ_CUBE)
-            t = cube_intersect(ro, rd,
+            t = cube_intersect(ro, rd, scene[i].position,
                                scene[i].cube.min,
                                scene[i].cube.max);
 
@@ -329,7 +366,21 @@ V3f trace(V3f ro, V3f rd, size_t depth, uint32_t *seed)
         return (V3f){0.87f, 0.99f, 1.f}; // Space
 
     V3f p = v3f_add(ro, v3f_scale(rd, t_min));
-    V3f n = (hit_obj->type == OBJ_SPHERE) ? v3f_safe_norm(v3f_sub(p, hit_obj->position)) : hit_obj->normal;
+    V3f n;
+    switch (hit_obj->type)
+    {
+    case OBJ_SPHERE:
+        n = sphere_normal(p, hit_obj);
+        break;
+    case OBJ_PLANE:
+        n = plane_normal(p, hit_obj);
+        break;
+    case OBJ_CUBE:
+        n = cube_normal(p, hit_obj);
+        break;
+    default:
+        assert(0 && "Unknown OBJ type");
+    }
     Material material = hit_obj->material;
 
     V3f p_eps = v3f_add(p, v3f_scale(n, __FLT_EPSILON__ * 10.f));
@@ -340,7 +391,7 @@ V3f trace(V3f ro, V3f rd, size_t depth, uint32_t *seed)
     if (material.type == MAT_LAMBERTIAN)
     {
         V3f base_color = material.color;
-        if (material.texture) 
+        if (material.texture)
         {
             switch (hit_obj->type)
             {
@@ -351,11 +402,11 @@ V3f trace(V3f ro, V3f rd, size_t depth, uint32_t *seed)
                 base_color = plane_uv(p, n, material.texture);
                 break;
             case OBJ_CUBE:
-                base_color = cube_uv(p, n, material.texture);
+                base_color = cube_uv(p, n, hit_obj, material.texture);
                 break;
-            
+
             default:
-                break;
+                assert(0 && "Unknown OBJ type");
             }
         }
 
@@ -368,13 +419,22 @@ V3f trace(V3f ro, V3f rd, size_t depth, uint32_t *seed)
         SDL_bool in_shadow = SDL_FALSE;
         for (size_t i = 0; i < SCENE_SIZE; i++)
         {
+            Object s_obj = scene[i];
             float t_shadow = -1.f;
-            if (scene[i].type == OBJ_SPHERE)
-                t_shadow = sphere_intersect(p_eps, to_light, scene[i].position, scene[i].radius);
-            else if (scene[i].type == OBJ_PLANE)
-                t_shadow = plane_intersect(p_eps, to_light, scene[i].position, scene[i].normal);
-            else if (scene[i].type == OBJ_CUBE)
-                t_shadow = cube_intersect(p_eps, to_light, scene[i].cube.min, scene[i].cube.max);
+            switch (s_obj.type)
+            {
+            case OBJ_SPHERE:
+                t_shadow = sphere_intersect(p_eps, to_light, s_obj.position, s_obj.radius);
+                break;
+            case OBJ_PLANE:
+                t_shadow = plane_intersect(p_eps, to_light, s_obj.position, s_obj.normal);
+                break;
+            case OBJ_CUBE:
+                t_shadow = cube_intersect(p_eps, to_light, s_obj.position, s_obj.cube.min, s_obj.cube.max);
+                break;
+            default:
+                assert(0 && "Unknown OBJ type");
+            }
             if (t_shadow > 0.f)
             {
                 in_shadow = SDL_TRUE;
@@ -477,15 +537,15 @@ void *worker(void *arg)
     return NULL;
 }
 
-SDL_Surface* load_texture(const char* path)
+SDL_Surface *load_texture(const char *path)
 {
-    SDL_Surface* surface = IMG_Load(path);
+    SDL_Surface *surface = IMG_Load(path);
     if (!surface)
     {
         printf("IMG_Load Error: %s\n", IMG_GetError());
         return NULL;
     }
-    SDL_Surface* converted = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_XRGB8888, 0);
+    SDL_Surface *converted = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_XRGB8888, 0);
     SDL_FreeSurface(surface);
     if (!converted)
     {
@@ -509,8 +569,7 @@ int main(void)
         SDL_WINDOWPOS_CENTERED,
         WIDTH,
         HEIGHT,
-        SDL_WINDOW_SHOWN
-    );
+        SDL_WINDOW_SHOWN);
     SDL_SetRelativeMouseMode(SDL_TRUE);
     if (!window)
     {
@@ -520,10 +579,9 @@ int main(void)
     }
 
     SDL_Renderer *renderer = SDL_CreateRenderer(
-        window, 
+        window,
         -1,
-        SDL_RENDERER_SOFTWARE
-    );
+        SDL_RENDERER_SOFTWARE);
     if (!renderer)
     {
         SDL_DestroyWindow(window);
@@ -622,7 +680,7 @@ int main(void)
 
     scene[0].material.texture = checkerboard;
     scene[3].material.texture = strange;
-    scene[4].material.texture = wood;
+    scene[4].material.texture = strange;
 
     size_t num_segments = ((WIDTH + SEGMENT_SIZE - 1) / SEGMENT_SIZE) * ((HEIGHT + SEGMENT_SIZE - 1) / SEGMENT_SIZE);
     Segment *segments = malloc(sizeof(Segment) * num_segments);
@@ -709,7 +767,7 @@ int main(void)
 
             SDL_Surface *fps_surface =
                 TTF_RenderUTF8_Blended(font, fps_text,
-                                    (SDL_Color){0,0,0,255});
+                                       (SDL_Color){0, 0, 0, 255});
 
             if (fps_texture)
                 SDL_DestroyTexture(fps_texture);
